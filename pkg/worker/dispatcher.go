@@ -79,12 +79,7 @@ func handleSubmitBatch(w http.ResponseWriter, r *http.Request) {
 	batchesMu.Lock()
 	batches[id] = b
 	batchesMu.Unlock()
-	// LAB: STEP3 TODO - Currently all jobs run in a single shared pool.
-	// Slow jobs (simulated ~1s each) block fast jobs (simulated ~10ms each).
-	// Participants should:
-	//   1. Create separate goroutine pools for fast and slow jobs
-	//   2. Cap slow concurrency (e.g., max 5 slow workers) so it cannot starve fast
-	//   3. Keep fast pool large enough to process fast jobs without delay
+
 	go processBatch(b)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -92,18 +87,22 @@ func handleSubmitBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func processBatch(b *Batch) {
-	// LAB: STEP3 TODO - This is a single shared pool with limited concurrency.
-	// Both fast and slow jobs compete for the same workers.
-	// When slow jobs occupy all workers, fast jobs are starved.
-	poolSize := 10
-	sem := make(chan struct{}, poolSize)
+	// Bulkhead pattern: separate pools for fast and slow jobs
+	// so slow jobs cannot starve fast ones.
+	fastPoolSize := 20
+	slowPoolSize := 5
+
+	fastSem := make(chan struct{}, fastPoolSize)
+	slowSem := make(chan struct{}, slowPoolSize)
+
 	var wg sync.WaitGroup
+
 	for i := 0; i < b.Fast; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			fastSem <- struct{}{}
+			defer func() { <-fastSem }()
 			start := time.Now()
 			time.Sleep(10 * time.Millisecond)
 			b.recordResult("fast", time.Since(start))
@@ -113,8 +112,8 @@ func processBatch(b *Batch) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			slowSem <- struct{}{}
+			defer func() { <-slowSem }()
 			start := time.Now()
 			time.Sleep(1 * time.Second)
 			b.recordResult("slow", time.Since(start))
